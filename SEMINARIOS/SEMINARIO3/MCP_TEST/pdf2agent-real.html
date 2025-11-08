@@ -1,0 +1,1103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF2Agent - Análisis Real de PDF</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        .gradient-bg { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .chat-bubble { animation: fadeInUp 0.3s ease-out; }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .highlight { background-color: yellow; font-weight: bold; }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect } = React;
+
+        function PDF2AgentRealAnalysis() {
+            const [messages, setMessages] = useState([
+                { 
+                    type: 'assistant', 
+                    content: '¡Hola! Soy PDF2Agent con análisis REAL de contenido PDF. Carga un documento y te daré respuestas específicas basadas en su contenido actual.',
+                    timestamp: new Date().toLocaleTimeString()
+                }
+            ]);
+            const [input, setInput] = useState('');
+            const [isLoading, setIsLoading] = useState(false);
+            const [extractedText, setExtractedText] = useState('');
+            const [fileName, setFileName] = useState('');
+            const [analysisMode, setAnalysisMode] = useState('ollama');
+            const [fileSuggestions, setFileSuggestions] = useState([]);
+            const [generatedFiles, setGeneratedFiles] = useState([]);
+            const [showFilePanel, setShowFilePanel] = useState(false);
+            const [isCreatingFile, setIsCreatingFile] = useState(false);
+            const fileInputRef = useRef();
+
+            // Configurar PDF.js
+            if (typeof pdfjsLib !== 'undefined') {
+                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            }
+
+            // Cargar archivos generados al iniciar
+            useEffect(() => {
+                loadGeneratedFiles();
+            }, []);
+
+            const extractTextFromPDF = async (file) => {
+                try {
+                    setIsLoading(true);
+                    addMessage('system', '📄 Extrayendo texto del PDF...');
+                    
+                    const arrayBuffer = await file.arrayBuffer();
+                    const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+                    let fullText = '';
+                    
+                    addMessage('system', `📖 Procesando ${pdf.numPages} páginas...`);
+                    
+                    for (let i = 1; i <= pdf.numPages; i++) {
+                        const page = await pdf.getPage(i);
+                        const textContent = await page.getTextContent();
+                        const pageText = textContent.items.map(item => item.str).join(' ');
+                        fullText += `\n=== PÁGINA ${i} ===\n${pageText}\n`;
+                    }
+                    
+                    return fullText;
+                } catch (error) {
+                    console.error('Error extrayendo PDF:', error);
+                    throw new Error(`Error al procesar el PDF: ${error.message}`);
+                }
+            };
+
+            const handleFileUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file || file.type !== 'application/pdf') {
+                    alert('Por favor selecciona un archivo PDF válido.');
+                    return;
+                }
+
+                try {
+                    setFileName(file.name);
+                    addMessage('user', `📄 Cargando: ${file.name}`);
+                    
+                    const text = await extractTextFromPDF(file);
+                    setExtractedText(text);
+                    
+                    const stats = {
+                        pages: text.split('=== PÁGINA').length - 1,
+                        chars: text.length,
+                        words: text.split(/\s+/).length
+                    };
+                    
+                    addMessage('assistant', `✅ **PDF Procesado Exitosamente**
+
+📊 **Estadísticas:**
+• Páginas: ${stats.pages}
+• Caracteres: ${stats.chars.toLocaleString()}
+• Palabras: ${stats.words.toLocaleString()}
+
+🎯 **¡Listo para análisis!** Ahora puedes hacer preguntas específicas sobre el contenido del documento. El sistema analizará el texto real extraído.
+
+💡 **Ejemplos de preguntas:**
+• "¿Cuál es el tema principal?"
+• "Resume los puntos importantes"
+• "¿Qué datos numéricos aparecen?"
+• "Busca información sobre [tema específico]"`);
+
+                } catch (error) {
+                    addMessage('assistant', `❌ **Error al procesar PDF**
+
+**Error:** ${error.message}
+
+🔧 **Soluciones:**
+1. Verifica que el PDF no esté protegido
+2. Intenta con otro archivo PDF
+3. El archivo puede estar corrupto`);
+                } finally {
+                    setIsLoading(false);
+                }
+            };
+
+            // Obtener sugerencias de archivos a crear
+            const getFileSuggestions = async () => {
+                if (!extractedText) return;
+                
+                try {
+                    const response = await fetch('http://localhost:3001/api/suggest-files', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            pdfContent: extractedText,
+                            userQuery: input || 'análisis general'
+                        })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        setFileSuggestions(data.suggestions || []);
+                        setShowFilePanel(true);
+                        addMessage('system', `💡 ${data.suggestions.length} sugerencias de archivos disponibles`);
+                    }
+                } catch (error) {
+                    console.error('Error obteniendo sugerencias:', error);
+                }
+            };
+
+            // Crear archivo específico
+            const createFile = async (templateKey, fileName = null) => {
+                if (!extractedText) return;
+                
+                setIsCreatingFile(true);
+                try {
+                    const response = await fetch('http://localhost:3001/api/create-file', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            pdfContent: extractedText,
+                            templateKey,
+                            fileName,
+                            userQuery: input || 'análisis general'
+                        })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        setGeneratedFiles(prev => [...prev, data.file]);
+                        addMessage('assistant', `✅ **Archivo creado exitosamente**
+
+📄 **${data.file.name}**
+📊 Tamaño: ${data.file.size} bytes
+🎨 Plantilla: ${data.file.template}
+📅 Creado: ${new Date(data.file.created).toLocaleString()}
+
+**Vista previa:**
+\`\`\`
+${data.preview}
+\`\`\`
+
+💾 [Descargar archivo](${window.location.origin}${data.downloadUrl})`);
+                        
+                        // Actualizar lista de archivos
+                        loadGeneratedFiles();
+                    }
+                } catch (error) {
+                    addMessage('assistant', `❌ Error al crear archivo: ${error.message}`);
+                } finally {
+                    setIsCreatingFile(false);
+                }
+            };
+
+            // Crear múltiples archivos
+            const createBatchFiles = async (templates) => {
+                if (!extractedText || templates.length === 0) return;
+                
+                setIsCreatingFile(true);
+                try {
+                    const response = await fetch('http://localhost:3001/api/create-batch-files', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            pdfContent: extractedText,
+                            templates,
+                            userQuery: input || 'análisis general'
+                        })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        addMessage('assistant', `🎉 **Archivos creados en lote**
+
+📂 **Directorio:** ${data.batchDirectory}
+📊 **Resultados:** ${data.summary.created} creados, ${data.summary.failed} fallos
+
+**Archivos generados:**
+${data.results.map(r => `• ${r.fileName} (${r.size} bytes)`).join('\n')}
+
+${data.errors.length > 0 ? `**Errores:**\n${data.errors.map(e => `• ${e.template}: ${e.error}`).join('\n')}` : ''}`);
+                        
+                        loadGeneratedFiles();
+                    }
+                } catch (error) {
+                    addMessage('assistant', `❌ Error en creación por lotes: ${error.message}`);
+                } finally {
+                    setIsCreatingFile(false);
+                }
+            };
+
+            // Cargar lista de archivos generados
+            const loadGeneratedFiles = async () => {
+                try {
+                    const response = await fetch('http://localhost:3001/api/list-files');
+                    if (response.ok) {
+                        const data = await response.json();
+                        setGeneratedFiles(data.files || []);
+                    }
+                } catch (error) {
+                    console.error('Error cargando archivos:', error);
+                }
+            };
+
+            // Crear directorio/carpeta
+            const createDirectory = async (message) => {
+                try {
+                    // Extraer el nombre de la carpeta del mensaje
+                    const messageLower = message.toLowerCase();
+                    let folderName = 'nueva-carpeta';
+                    
+                    // Buscar patrones como "crear carpeta [nombre]" o "crear una carpeta con el nombre [nombre]"
+                    const patterns = [
+                        /crear\s+(?:una\s+)?carpeta\s+(?:con\s+el\s+nombre\s+)?(.+)/i,
+                        /crear\s+(?:un\s+)?directorio\s+(?:con\s+el\s+nombre\s+)?(.+)/i,
+                        /crear\s+(?:un\s+)?folder\s+(?:con\s+el\s+nombre\s+)?(.+)/i
+                    ];
+                    
+                    for (const pattern of patterns) {
+                        const match = message.match(pattern);
+                        if (match && match[1]) {
+                            folderName = match[1].trim();
+                            break;
+                        }
+                    }
+                    
+                    // Limpiar el nombre (solo alfanuméricos, guiones y guiones bajos)
+                    folderName = folderName.replace(/[^a-zA-Z0-9\-_\s]/g, '').replace(/\s+/g, '-').toLowerCase();
+                    
+                    if (!folderName || folderName === '-') {
+                        folderName = 'nueva-carpeta';
+                    }
+
+                    setIsCreatingFile(true);
+                    addMessage('user', message);
+                    
+                    const response = await fetch('http://localhost:3001/api/create-directory', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            directoryName: folderName
+                        })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        addMessage('assistant', `✅ **Carpeta creada exitosamente**
+
+📁 **Nombre:** ${data.directoryName || folderName}
+📂 **Ruta:** ${data.path || 'Directorio de trabajo'}
+📅 **Creada:** ${new Date().toLocaleString()}
+
+💡 **Próximos pasos:**
+- Usa "crear archivos" para generar contenido en esta carpeta
+- Los archivos se organizarán automáticamente
+- Puedes crear subcarpetas con "crear carpeta [nombre]"`);
+                        
+                        // Recargar lista de archivos
+                        loadGeneratedFiles();
+                    } else {
+                        const errorData = await response.json();
+                        throw new Error(errorData.error || 'Error al crear carpeta');
+                    }
+                } catch (error) {
+                    addMessage('assistant', `❌ **Error al crear carpeta**
+
+**Error:** ${error.message}
+
+💡 **Sugerencias:**
+- Intenta con: "crear carpeta mi-proyecto"
+- O simplemente: "crear carpeta test"
+- El nombre solo puede contener letras, números y guiones`);
+                } finally {
+                    setIsCreatingFile(false);
+                }
+            };
+
+            // Crear archivo específico con nombre y tipo
+            const createSpecificFile = async (message) => {
+                try {
+                    const messageLower = message.toLowerCase();
+                    let fileName = 'nuevo-archivo';
+                    let fileExtension = '.txt';
+                    let customContent = '';
+
+                    // Patrones para detectar archivo específico
+                    const filePatterns = [
+                        /crear\s+(?:un\s+)?archivo\s+(\w+)\s+con\s+(?:el\s+)?nombre\s+([^\.]+)(?:\.(\w+))?/i,
+                        /crear\s+(?:un\s+)?archivo\s+([^\.]+)\.(\w+)/i,
+                        /crear\s+(?:un\s+)?archivo\s+(\w+)\s+(?:llamado|con nombre)\s+([^\.]+)/i,
+                        /crear\s+(?:un\s+)?archivo\s+(?:de tipo\s+)?(\w+)?\s*(?:con\s+(?:el\s+)?nombre\s+)?([^\s]+)/i
+                    ];
+
+                    let matchFound = false;
+
+                    // Intentar extraer tipo y nombre del archivo
+                    for (const pattern of filePatterns) {
+                        const match = message.match(pattern);
+                        if (match) {
+                            if (pattern.source.includes('con\s+(?:el\s+)?nombre')) {
+                                // Patrón: "crear un archivo txt con el nombre test"
+                                fileExtension = match[1] ? `.${match[1].toLowerCase()}` : '.txt';
+                                fileName = match[2] || 'test';
+                            } else if (match[2]) {
+                                // Patrón: "crear archivo test.txt"
+                                fileName = match[1];
+                                fileExtension = `.${match[2]}`;
+                            } else {
+                                fileName = match[1] || match[2] || 'test';
+                                if (messageLower.includes('txt')) fileExtension = '.txt';
+                                else if (messageLower.includes('md')) fileExtension = '.md';
+                                else if (messageLower.includes('json')) fileExtension = '.json';
+                            }
+                            matchFound = true;
+                            break;
+                        }
+                    }
+
+                    // Si no se encontró patrón, usar detección simple
+                    if (!matchFound) {
+                        if (messageLower.includes('txt')) {
+                            fileExtension = '.txt';
+                            const nameMatch = message.match(/nombre\s+([^\s]+)/i);
+                            fileName = nameMatch ? nameMatch[1] : 'test';
+                        } else if (messageLower.includes('md')) {
+                            fileExtension = '.md';
+                            const nameMatch = message.match(/nombre\s+([^\s]+)/i);
+                            fileName = nameMatch ? nameMatch[1] : 'documento';
+                        }
+                    }
+
+                    // Limpiar nombre de archivo
+                    fileName = fileName.replace(/[^a-zA-Z0-9\-_]/g, '').toLowerCase();
+                    if (!fileName) fileName = 'archivo';
+
+                    // Generar contenido basado en tipo de archivo y PDF
+                    if (extractedText) {
+                        if (fileExtension === '.txt') {
+                            customContent = `Archivo creado desde PDF2Agent
+Fecha: ${new Date().toLocaleString()}
+Documento fuente: PDF analizado
+
+CONTENIDO EXTRAÍDO:
+==================
+
+${extractedText.substring(0, 1000)}...
+
+---
+Este archivo fue generado automáticamente desde el análisis del PDF.
+Puedes editarlo según tus necesidades.`;
+                        } else if (fileExtension === '.md') {
+                            customContent = `# ${fileName.charAt(0).toUpperCase() + fileName.slice(1)}
+
+> Documento generado automáticamente desde PDF2Agent
+
+## Información
+
+- **Fecha:** ${new Date().toLocaleString()}
+- **Fuente:** PDF analizado
+- **Tipo:** Archivo Markdown
+
+## Contenido
+
+${extractedText.substring(0, 800)}...
+
+---
+
+*Generado por PDF2Agent*`;
+                        } else if (fileExtension === '.json') {
+                            customContent = JSON.stringify({
+                                archivo: fileName + fileExtension,
+                                generado: new Date().toISOString(),
+                                fuente: "PDF2Agent",
+                                contenido: {
+                                    texto: extractedText.substring(0, 500) + "...",
+                                    caracteres: extractedText.length,
+                                    generado_automaticamente: true
+                                }
+                            }, null, 2);
+                        }
+                    } else {
+                        // Contenido por defecto si no hay PDF cargado
+                        customContent = `Archivo ${fileName}${fileExtension}
+Creado el: ${new Date().toLocaleString()}
+
+Este archivo fue creado mediante comando de texto.
+Puedes editarlo con el contenido que necesites.`;
+                    }
+
+                    setIsCreatingFile(true);
+                    addMessage('user', message);
+
+                    // Crear el archivo usando el endpoint existente
+                    const response = await fetch('http://localhost:3001/api/create-file', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            pdfContent: extractedText || '',
+                            templateKey: 'custom', // Indicar que es contenido personalizado
+                            fileName: fileName + fileExtension,
+                            userQuery: message,
+                            customContent: customContent
+                        })
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        addMessage('assistant', `✅ **Archivo creado exitosamente**
+
+📄 **Nombre:** ${data.file.name}
+📁 **Ruta:** ${data.file.path}
+💾 **Tamaño:** ${data.file.size} bytes
+📅 **Creado:** ${new Date(data.file.created).toLocaleString()}
+
+**Vista previa:**
+\`\`\`
+${customContent.substring(0, 300)}${customContent.length > 300 ? '\n...' : ''}
+\`\`\`
+
+💾 [Descargar archivo](${window.location.origin}${data.downloadUrl})
+
+💡 **Comandos útiles:**
+- "crear otro archivo [tipo] [nombre]"
+- "crear archivos" (para más sugerencias)
+- "crear carpeta [nombre]" (para organizar)`);
+                        
+                        loadGeneratedFiles();
+                    } else {
+                        const errorData = await response.json();
+                        throw new Error(errorData.error || 'Error al crear archivo');
+                    }
+
+                } catch (error) {
+                    addMessage('assistant', `❌ **Error al crear archivo**
+
+**Error:** ${error.message}
+
+💡 **Ejemplos de comandos válidos:**
+- "crear un archivo txt con el nombre test"
+- "crear archivo documento.md"  
+- "crear un archivo json llamado datos"
+- "crear archivo config.txt"
+
+🔧 **El nombre solo puede contener letras, números y guiones**`);
+                } finally {
+                    setIsCreatingFile(false);
+                }
+            };
+
+            const addMessage = (type, content) => {
+                setMessages(prev => [...prev, {
+                    type,
+                    content,
+                    timestamp: new Date().toLocaleTimeString()
+                }]);
+            };
+
+            const findRelevantContent = (text, query) => {
+                const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+                const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 10);
+                
+                const relevantSentences = sentences
+                    .map(sentence => {
+                        const lowerSentence = sentence.toLowerCase();
+                        const matches = queryWords.filter(word => lowerSentence.includes(word));
+                        return {
+                            sentence: sentence.trim(),
+                            relevance: matches.length,
+                            matchedWords: matches
+                        };
+                    })
+                    .filter(item => item.relevance > 0)
+                    .sort((a, b) => b.relevance - a.relevance)
+                    .slice(0, 5);
+                
+                return relevantSentences;
+            };
+
+            const extractNumbers = (text) => {
+                const numberPatterns = text.match(/\d+(?:[.,]\d+)*%?/g) || [];
+                const uniqueNumbers = [...new Set(numberPatterns)];
+                return uniqueNumbers.slice(0, 10);
+            };
+
+            const analyzeContent = (text, query) => {
+                const queryLower = query.toLowerCase();
+                
+                // Análisis específico según el tipo de pregunta
+                let analysis = {
+                    type: 'general',
+                    relevantContent: [],
+                    numbers: [],
+                    summary: '',
+                    keyFindings: []
+                };
+
+                // Encontrar contenido relevante
+                analysis.relevantContent = findRelevantContent(text, query);
+                
+                // Extraer números si la pregunta es sobre datos/métricas
+                if (queryLower.includes('número') || queryLower.includes('dato') || 
+                    queryLower.includes('métrica') || queryLower.includes('resultado') ||
+                    queryLower.includes('estadística')) {
+                    analysis.numbers = extractNumbers(text);
+                    analysis.type = 'numeric';
+                }
+                
+                // Análisis de resumen
+                if (queryLower.includes('resumen') || queryLower.includes('resume') || 
+                    queryLower.includes('principal') || queryLower.includes('importante')) {
+                    const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 50);
+                    analysis.keyFindings = paragraphs.slice(0, 3).map(p => p.trim().substring(0, 200) + '...');
+                    analysis.type = 'summary';
+                }
+                
+                // Análisis de metodología
+                if (queryLower.includes('metodología') || queryLower.includes('método') || 
+                    queryLower.includes('proceso') || queryLower.includes('enfoque')) {
+                    const methodSentences = findRelevantContent(text, 'metodología proceso método enfoque técnica');
+                    analysis.relevantContent = methodSentences;
+                    analysis.type = 'methodology';
+                }
+                
+                return analysis;
+            };
+
+            const handleSendMessage = async (message = input) => {
+                if (!message.trim()) return;
+                if (!extractedText) {
+                    addMessage('assistant', '❌ Primero debes cargar un archivo PDF para poder analizarlo.');
+                    return;
+                }
+
+                // Detectar comandos especiales para crear archivos y directorios
+                const messageLower = message.toLowerCase().trim();
+                
+                // Comando: crear carpetas/directorios
+                if (messageLower.includes('crear carpeta') || messageLower.includes('crear directorio') || 
+                    messageLower.includes('crear folder') || messageLower.includes('crear una carpeta')) {
+                    await createDirectory(message);
+                    return;
+                }
+                
+                // Comando: crear archivo específico con nombre y tipo
+                if (messageLower.includes('crear un archivo') || messageLower.includes('crear archivo') || 
+                    messageLower.includes('generar un archivo') || messageLower.includes('generar archivo') ||
+                    messageLower.includes('crear fichero') || messageLower.includes('crear un fichero')) {
+                    await createSpecificFile(message);
+                    return;
+                }
+                
+                // Comando: "crear archivos" o "generar archivos" (sugerencias múltiples)
+                if (messageLower.includes('crear archivos') || messageLower.includes('generar archivos') || 
+                    messageLower.includes('sugerir archivo') || messageLower.includes('qué archivo') || 
+                    messageLower.includes('que archivo') || messageLower.includes('qué archivos') ||
+                    messageLower.includes('que archivos')) {
+                    await getFileSuggestions();
+                    return;
+                }
+                
+                // Comando específico: "crear [tipo]" con más variaciones
+                const createCommands = {
+                    'crear guía': 'code_guide',
+                    'crear guia': 'code_guide', // sin tilde
+                    'generar guía': 'code_guide',
+                    'hacer guía': 'code_guide',
+                    'crear resumen': 'summary',
+                    'generar resumen': 'summary',
+                    'hacer resumen': 'summary',
+                    'resumir': 'summary',
+                    'crear documentación': 'technical_doc',
+                    'crear documentacion': 'technical_doc', // sin tilde
+                    'generar documentación': 'technical_doc',
+                    'crear doc': 'technical_doc',
+                    'crear análisis': 'data_analysis',
+                    'crear analisis': 'data_analysis', // sin tilde
+                    'generar análisis': 'data_analysis',
+                    'analizar datos': 'data_analysis',
+                    'crear metodología': 'methodology',
+                    'crear metodologia': 'methodology', // sin tilde
+                    'generar metodología': 'methodology',
+                    'crear método': 'methodology',
+                    'crear metodo': 'methodology', // sin tilde
+                    'crear código': 'source_code',
+                    'crear codigo': 'source_code', // sin tilde
+                    'generar código': 'source_code',
+                    'extraer código': 'source_code',
+                    'crear lista': 'checklist',
+                    'generar lista': 'checklist',
+                    'hacer lista': 'checklist',
+                    'crear checklist': 'checklist',
+                    'crear configuración': 'configuration',
+                    'crear configuracion': 'configuration', // sin tilde
+                    'generar config': 'configuration',
+                    'crear config': 'configuration'
+                };
+
+                // Buscar comandos de creación de archivos
+                for (const [command, template] of Object.entries(createCommands)) {
+                    if (messageLower.includes(command)) {
+                        await createFile(template);
+                        return;
+                    }
+                }
+
+                // Comando para crear múltiples archivos (más variaciones)
+                if (messageLower.includes('crear todos') || messageLower.includes('generar todos') ||
+                    messageLower.includes('crear todo') || messageLower.includes('generar todo') ||
+                    messageLower.includes('crear múltiples') || messageLower.includes('crear multiples') ||
+                    messageLower.includes('crear varios') || messageLower.includes('generar varios')) {
+                    const allTemplates = ['summary', 'code_guide', 'technical_doc', 'data_analysis'];
+                    await createBatchFiles(allTemplates);
+                    return;
+                }
+
+                setIsLoading(true);
+                addMessage('user', message);
+                setInput('');
+
+                try {
+                    // Usar el backend real para análisis
+                    const response = await fetch('http://localhost:3001/api/analyze-real', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            pdfContent: extractedText,
+                            userMessage: message,
+                            useAI: true
+                        })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    addMessage('assistant', data.response || data.message);
+                    
+                } catch (error) {
+                    console.error('Error:', error);
+                    
+                    // Fallback al análisis local si el servidor falla
+                    const analysis = analyzeContent(extractedText, message);
+                    
+                    let fallbackResponse = `🔍 **ANÁLISIS LOCAL DEL DOCUMENTO**
+
+**Documento:** ${fileName}
+**Consulta:** "${message}"
+**Nota:** Usando análisis local (servidor no disponible)
+
+`;
+
+                    if (analysis.relevantContent.length > 0) {
+                        fallbackResponse += `📄 **Contenido Relevante Encontrado:**\n\n`;
+                        analysis.relevantContent.forEach((item, index) => {
+                            fallbackResponse += `${index + 1}. "${item.sentence}"\n   *(Coincidencias: ${item.matchedWords.join(', ')})*\n\n`;
+                        });
+                    }
+
+                    if (analysis.numbers.length > 0) {
+                        fallbackResponse += `📊 **Datos Numéricos:** ${analysis.numbers.join(', ')}\n\n`;
+                    }
+
+                    if (analysis.type === 'summary' && analysis.keyFindings.length > 0) {
+                        fallbackResponse += `📋 **Secciones Principales:**\n\n`;
+                        analysis.keyFindings.forEach((finding, index) => {
+                            fallbackResponse += `${index + 1}. ${finding}\n\n`;
+                        });
+                    }
+
+                    const contextAnalysis = generateContextualAnalysis(message, analysis, extractedText);
+                    fallbackResponse += contextAnalysis;
+
+                    fallbackResponse += `\n---
+✅ **Análisis basado en contenido real extraído del PDF**
+📊 **Texto analizado:** ${extractedText.length.toLocaleString()} caracteres
+🎯 **Coincidencias encontradas:** ${analysis.relevantContent.length}`;
+
+                    fallbackResponse += `\n\n💡 **Error del servidor:** ${error.message}`;
+                    
+                    addMessage('assistant', fallbackResponse);
+                } finally {
+                    setIsLoading(false);
+                }
+
+            };
+
+            const generateContextualAnalysis = (query, analysis, fullText) => {
+                const queryLower = query.toLowerCase();
+                
+                if (queryLower.includes('conclusión') || queryLower.includes('resultado')) {
+                    return `🎯 **Análisis de Conclusiones:**
+Las conclusiones principales se encuentran en las secciones identificadas arriba. El documento presenta resultados específicos que se han extraído directamente del contenido.`;
+                }
+                
+                if (queryLower.includes('metodología') || queryLower.includes('método')) {
+                    return `🔬 **Análisis Metodológico:**
+Se han identificado referencias a procesos y metodologías en el documento. Los fragmentos mostrados contienen información específica sobre los enfoques utilizados.`;
+                }
+                
+                if (queryLower.includes('tema') || queryLower.includes('trata')) {
+                    const words = fullText.toLowerCase().split(/\s+/);
+                    const wordCount = {};
+                    words.forEach(word => {
+                        if (word.length > 4) {
+                            wordCount[word] = (wordCount[word] || 0) + 1;
+                        }
+                    });
+                    
+                    const topWords = Object.entries(wordCount)
+                        .sort(([,a], [,b]) => b - a)
+                        .slice(0, 5)
+                        .map(([word, count]) => `${word} (${count})`);
+                    
+                    return `📚 **Análisis Temático:**
+Basado en la frecuencia de palabras clave en el documento:
+Términos principales: ${topWords.join(', ')}
+
+El documento se centra en los temas identificados a través del análisis de contenido real.`;
+                }
+                
+                return `💡 **Análisis Contextual:**
+El análisis se ha realizado sobre el contenido específico del documento cargado. Los resultados mostrados provienen directamente del texto extraído del PDF.`;
+            };
+
+            const quickQueries = [
+                "¿Cuál es el tema principal de este documento?",
+                "Resume los puntos más importantes",
+                "¿Qué datos numéricos contiene?",
+                "¿Cuáles son las conclusiones principales?",
+                "Busca información sobre metodología"
+            ];
+
+            const fileCommands = [
+                { text: "Crear archivos sugeridos", command: "crear archivos", icon: "💡" },
+                { text: "Crear resumen ejecutivo", command: "crear resumen", icon: "📋" },
+                { text: "Crear guía de código", command: "crear guía", icon: "📄" },
+                { text: "Crear análisis de datos", command: "crear análisis", icon: "📊" },
+                { text: "Crear todos los archivos", command: "crear todos", icon: "🎯" }
+            ];
+
+            const specificFileCommands = [
+                { text: "Crear archivo notas.txt", command: "crear un archivo txt con el nombre notas", icon: "📝" },
+                { text: "Crear archivo resumen.md", command: "crear un archivo md con el nombre resumen", icon: "📄" },
+                { text: "Crear archivo datos.json", command: "crear un archivo json con el nombre datos", icon: "🔧" }
+            ];
+
+            const directoryCommands = [
+                { text: "Crear carpeta proyecto", command: "crear carpeta proyecto", icon: "📁" },
+                { text: "Crear carpeta documentos", command: "crear carpeta documentos", icon: "📂" },
+                { text: "Crear carpeta códigos", command: "crear carpeta codigos", icon: "💻" }
+            ];
+
+            return (
+                <div className="min-h-screen gradient-bg">
+                    <div className="container mx-auto px-4 py-8">
+                        <div className="text-center mb-8">
+                            <h1 className="text-4xl font-bold text-white mb-2">
+                                🔍 PDF2Agent - Análisis Real
+                            </h1>
+                            <p className="text-blue-200">
+                                Extrae y analiza el contenido REAL de documentos PDF
+                            </p>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                            <div className="lg:col-span-1 space-y-6">
+                                {/* File Upload */}
+                                <div className="bg-white rounded-lg shadow-lg p-6">
+                                    <h3 className="text-lg font-semibold mb-4">📄 Cargar PDF Real</h3>
+                                    <input
+                                        ref={fileInputRef}
+                                        type="file"
+                                        accept=".pdf"
+                                        onChange={handleFileUpload}
+                                        className="w-full p-2 border border-gray-300 rounded-lg mb-4"
+                                    />
+                                    {fileName && (
+                                        <div className="text-sm text-green-600">
+                                            ✅ {fileName}
+                                        </div>
+                                    )}
+                                    {extractedText && (
+                                        <div className="mt-2 text-xs text-gray-600">
+                                            📊 {extractedText.length.toLocaleString()} caracteres extraídos
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Analysis Mode */}
+                                <div className="bg-white rounded-lg shadow-lg p-6">
+                                    <h3 className="text-lg font-semibold mb-4">⚙️ Modo de Análisis</h3>
+                                    <select
+                                        value={analysisMode}
+                                        onChange={(e) => setAnalysisMode(e.target.value)}
+                                        className="w-full p-2 border border-gray-300 rounded-lg"
+                                    >
+                                        <option value="intelligent">🧠 Análisis Inteligente</option>
+                                        <option value="contextual">🎯 Análisis Contextual</option>
+                                        <option value="numeric">📊 Enfoque en Datos</option>
+                                        <option value="summary">📋 Resumen Automático</option>
+                                    </select>
+                                    <p className="text-xs text-gray-500 mt-2">
+                                        Selecciona el tipo de análisis para optimizar las respuestas
+                                    </p>
+                                </div>
+
+                                {/* Quick Queries */}
+                                <div className="bg-white rounded-lg shadow-lg p-6">
+                                    <h3 className="text-lg font-semibold mb-4">⚡ Consultas Rápidas</h3>
+                                    <div className="space-y-2">
+                                        {quickQueries.map((query, index) => (
+                                            <button
+                                                key={index}
+                                                onClick={() => handleSendMessage(query)}
+                                                disabled={!extractedText || isLoading}
+                                                className="w-full text-left p-3 text-sm bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                {query}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* File Creation Commands */}
+                                <div className="bg-white rounded-lg shadow-lg p-6">
+                                    <h3 className="text-lg font-semibold mb-4">📁 Crear Archivos</h3>
+                                    <div className="space-y-2">
+                                        {fileCommands.map((cmd, index) => (
+                                            <button
+                                                key={index}
+                                                onClick={() => handleSendMessage(cmd.command)}
+                                                disabled={!extractedText || isLoading || isCreatingFile}
+                                                className="w-full text-left p-3 text-sm bg-green-50 hover:bg-green-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                                            >
+                                                <span className="mr-2">
+                                                    {isCreatingFile ? '⏳' : cmd.icon || '📄'}
+                                                </span>
+                                                {cmd.text}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Specific File Creation Commands */}
+                                <div className="bg-white rounded-lg shadow-lg p-6">
+                                    <h3 className="text-lg font-semibold mb-4">📝 Crear Archivos Específicos</h3>
+                                    <div className="space-y-2">
+                                        {specificFileCommands.map((cmd, index) => (
+                                            <button
+                                                key={index}
+                                                onClick={() => handleSendMessage(cmd.command)}
+                                                disabled={isLoading || isCreatingFile}
+                                                className="w-full text-left p-3 text-sm bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                                            >
+                                                <span className="mr-2">
+                                                    {isCreatingFile ? '⏳' : cmd.icon}
+                                                </span>
+                                                {cmd.text}
+                                            </button>
+                                        ))}
+                                        <div className="mt-2 pt-2 border-t border-gray-200">
+                                            <p className="text-xs text-gray-600 mb-1">💡 También puedes escribir:</p>
+                                            <p className="text-xs text-gray-500">"crear un archivo txt con el nombre [nombre]"</p>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Directory Creation Commands */}
+                                <div className="bg-white rounded-lg shadow-lg p-6">
+                                    <h3 className="text-lg font-semibold mb-4">📂 Crear Carpetas</h3>
+                                    <div className="space-y-2">
+                                        {directoryCommands.map((cmd, index) => (
+                                            <button
+                                                key={index}
+                                                onClick={() => handleSendMessage(cmd.command)}
+                                                disabled={isLoading || isCreatingFile}
+                                                className="w-full text-left p-3 text-sm bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+                                            >
+                                                <span className="mr-2">
+                                                    {isCreatingFile ? '⏳' : cmd.icon}
+                                                </span>
+                                                {cmd.text}
+                                            </button>
+                                        ))}
+                                        <div className="mt-2 pt-2 border-t border-gray-200">
+                                            <p className="text-xs text-gray-600 mb-1">💡 También puedes escribir:</p>
+                                            <p className="text-xs text-gray-500">"crear carpeta [nombre]"</p>
+                                        </div>
+                                    </div>
+                                    {generatedFiles.length > 0 && (
+                                        <div className="mt-4 pt-4 border-t">
+                                            <h4 className="text-sm font-medium mb-2">📂 Archivos Generados ({generatedFiles.length})</h4>
+                                            <div className="space-y-1 max-h-32 overflow-y-auto">
+                                                {generatedFiles.slice(0, 5).map((file, index) => (
+                                                    <div key={index} className="text-xs p-2 bg-gray-50 rounded flex justify-between items-center">
+                                                        <span className="truncate">📄 {file.name}</span>
+                                                        {file.downloadUrl && (
+                                                            <a 
+                                                                href={`http://localhost:3001${file.downloadUrl}`}
+                                                                target="_blank"
+                                                                rel="noopener noreferrer"
+                                                                className="text-blue-500 hover:text-blue-700 ml-2"
+                                                            >
+                                                                💾
+                                                            </a>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                                {generatedFiles.length > 5 && (
+                                                    <div className="text-xs text-gray-500 text-center">
+                                                        +{generatedFiles.length - 5} archivos más
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* File Suggestions Panel */}
+                                {showFilePanel && fileSuggestions.length > 0 && (
+                                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6">
+                                        <h3 className="text-lg font-semibold mb-4 text-yellow-800">💡 Archivos Sugeridos</h3>
+                                        <div className="space-y-2">
+                                            {fileSuggestions.map((suggestion, index) => (
+                                                <div key={index} className="bg-white p-3 rounded border">
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <span className="font-medium text-sm">{suggestion.name}</span>
+                                                        <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                                                            {suggestion.category}
+                                                        </span>
+                                                    </div>
+                                                    <p className="text-xs text-gray-600 mb-2">{suggestion.description}</p>
+                                                    <div className="flex justify-between items-center">
+                                                        <span className="text-xs text-gray-500">
+                                                            ~{suggestion.estimatedSize}
+                                                        </span>
+                                                        <button
+                                                            onClick={() => createFile(suggestion.key)}
+                                                            disabled={isCreatingFile}
+                                                            className="px-3 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 disabled:opacity-50"
+                                                        >
+                                                            {isCreatingFile ? 'Creando...' : 'Crear'}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <button
+                                            onClick={() => setShowFilePanel(false)}
+                                            className="mt-3 w-full py-2 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
+                                        >
+                                            Cerrar sugerencias
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Chat Area */}
+                            <div className="lg:col-span-3">
+                                <div className="bg-white rounded-lg shadow-lg h-96 flex flex-col">
+                                    <div className="flex-1 overflow-y-auto p-6">
+                                        {messages.map((message, index) => (
+                                            <div key={index} className={`mb-4 chat-bubble ${message.type === 'user' ? 'text-right' : ''}`}>
+                                                <div className={`inline-block max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
+                                                    message.type === 'user'
+                                                        ? 'bg-blue-500 text-white'
+                                                        : message.type === 'system'
+                                                        ? 'bg-yellow-100 text-gray-800 border border-yellow-300'
+                                                        : 'bg-gray-200 text-gray-800'
+                                                }`}>
+                                                    <div className="text-sm whitespace-pre-wrap">
+                                                        {message.content}
+                                                    </div>
+                                                    <div className={`text-xs mt-1 ${
+                                                        message.type === 'user' ? 'text-blue-200' : 'text-gray-500'
+                                                    }`}>
+                                                        {message.timestamp}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {isLoading && (
+                                            <div className="mb-4 chat-bubble">
+                                                <div className="inline-block bg-gray-200 text-gray-800 px-4 py-2 rounded-lg">
+                                                    <div className="flex items-center">
+                                                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-500 mr-2"></div>
+                                                        {extractedText ? 'Analizando contenido real...' : 'Extrayendo texto del PDF...'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="border-t border-gray-200 p-4">
+                                        <div className="flex space-x-2">
+                                            <input
+                                                type="text"
+                                                value={input}
+                                                onChange={(e) => setInput(e.target.value)}
+                                                onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                                                placeholder={extractedText ? "Pregunta sobre el contenido real del PDF..." : "Primero carga un PDF..."}
+                                                disabled={isLoading || !extractedText}
+                                                className="flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                                            />
+                                            <button
+                                                onClick={() => handleSendMessage()}
+                                                disabled={isLoading || !input.trim() || !extractedText}
+                                                className="px-6 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                            >
+                                                Analizar
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="mt-4 text-center">
+                                    <div className="inline-flex flex-wrap items-center justify-center gap-4 text-white text-sm">
+                                        <div className="flex items-center">
+                                            <div className="w-3 h-3 bg-green-400 rounded-full mr-2"></div>
+                                            PDF.js: Extracción Real
+                                        </div>
+                                        <div className="flex items-center">
+                                            <div className="w-3 h-3 bg-blue-400 rounded-full mr-2"></div>
+                                            Análisis: {analysisMode}
+                                        </div>
+                                        <div className="flex items-center">
+                                            <div className={`w-3 h-3 rounded-full mr-2 ${extractedText ? 'bg-green-400' : 'bg-gray-400'}`}></div>
+                                            Documento: {fileName || 'No cargado'}
+                                        </div>
+                                        <div className="flex items-center">
+                                            <div className={`w-3 h-3 rounded-full mr-2 ${generatedFiles.length > 0 ? 'bg-purple-400' : 'bg-gray-400'}`}></div>
+                                            Archivos: {generatedFiles.length}
+                                        </div>
+                                        <div className="flex items-center">
+                                            <div className={`w-3 h-3 rounded-full mr-2 ${isCreatingFile ? 'bg-yellow-400' : 'bg-gray-400'}`}></div>
+                                            {isCreatingFile ? 'Generando...' : 'Listo para crear'}
+                                        </div>
+                                    </div>
+                                    {extractedText && (
+                                        <div className="mt-2 text-xs text-blue-200">
+                                            💡 Comandos: "crear resumen", "crear un archivo txt con el nombre test", "crear carpeta [nombre]"
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<PDF2AgentRealAnalysis />, document.getElementById('root'));
+    </script>
+</body>
+</html>

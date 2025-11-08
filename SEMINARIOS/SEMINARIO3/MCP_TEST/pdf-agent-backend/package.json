@@ -1,0 +1,26 @@
+{
+  "name": "pdf-agent-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:llm": "node server-llm.js",
+    "start:real": "node server-real.js",
+    "dev": "nodemon server.js",
+    "dev:llm": "nodemon server-llm.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.68.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "ollama": "^0.6.2",
+    "openai": "^6.7.0"
+  }
+}
